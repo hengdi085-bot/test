@@ -2,11 +2,12 @@ import os
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -14,16 +15,11 @@ from telegram.ext import (
 TOKEN = os.getenv("TOKEN")
 TZ = timezone(timedelta(hours=8))
 
-# 上班人员
 workers = {}
-
-# 离岗人员
 away = {}
-
-# 迟到人员
 late_workers = {}
+off_workers = {}
 
-# 指令限制时间
 LIMITS = {
     "wc": ("上厕所", 15),
     "cy": ("抽烟", 10),
@@ -41,41 +37,39 @@ def get_name(user):
 
 
 def get_shift(t):
-    # 早上 05:00 - 下午 16:00 打 sb 算白班
-    if 5 <= t.hour < 16:
+    if 9 <= t.hour < 21:
         shift = "白班"
-        start_time = t.replace(hour=9, minute=0, second=0, microsecond=0)
-        late_time = t.replace(hour=10, minute=0, second=0, microsecond=0)
-        off_time = t.replace(hour=21, minute=0, second=0, microsecond=0)
+        start = t.replace(hour=9, minute=0, second=0, microsecond=0)
+        late = t.replace(hour=10, minute=0, second=0, microsecond=0)
+        off = t.replace(hour=21, minute=0, second=0, microsecond=0)
     else:
         shift = "夜班"
-        start_time = t.replace(hour=21, minute=0, second=0, microsecond=0)
-        late_time = t.replace(hour=22, minute=0, second=0, microsecond=0)
-        off_time = (t + timedelta(days=1)).replace(
-            hour=9, minute=0, second=0, microsecond=0
-        )
-
-    return shift, start_time, late_time, off_time
+        start = t.replace(hour=21, minute=0, second=0, microsecond=0)
+        late = t.replace(hour=22, minute=0, second=0, microsecond=0)
+        off = (t + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+    return shift, start, late, off
 
 
-def worker_list_text():
-    names = [v["name"] for v in workers.values()]
-    if not names:
-        return "暂无"
+def list_button():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 查看上班名单", callback_data="list_workers")],
+        [InlineKeyboardButton("🚶 查看离岗名单", callback_data="list_away")],
+        [InlineKeyboardButton("⏰ 查看迟到名单", callback_data="list_late")],
+        [InlineKeyboardButton("✅ 查看下班名单", callback_data="list_off")],
+    ])
 
-    return " ".join(names)
+
+def summary_text():
+    return f"远程当天上班总人数：{len(workers)}"
 
 
-def online_summary():
-    return (
-        f"远程当天上班总人数：{len(workers)}\n"
-        f"员工名单：{worker_list_text()}"
-    )
+async def send_summary(message, text):
+    await message.reply_text(text + "\n\n" + summary_text(), reply_markup=list_button())
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "打卡机器人已启动。\n\n"
+        "打卡机器人已启动\n\n"
         "上班：sb\n"
         "下班：xb\n"
         "上厕所：wc\n"
@@ -85,7 +79,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "回来：1\n\n"
         "查看人数：rs\n"
         "查看离岗：zt\n"
-        "查看迟到：cd"
+        "查看迟到：cd",
+        reply_markup=list_button()
     )
 
 
@@ -100,7 +95,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     t = now()
 
-    # 上班
     if text == "sb":
         shift, start_time, late_time, off_time = get_shift(t)
 
@@ -131,16 +125,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if is_late:
-            msg += f"⚠️ 状态：迟到 {late_minutes} 分钟\n"
+            msg += f"⚠️ 状态：迟到 {late_minutes} 分钟"
         else:
-            msg += "状态：正常\n"
+            msg += "状态：正常"
 
-        msg += "\n" + online_summary()
-
-        await update.message.reply_text(msg)
+        await send_summary(update.message, msg)
         return
 
-    # 下班
     if text == "xb":
         if uid not in workers:
             await update.message.reply_text(f"⚠️ {name} 你还没有上班打卡。")
@@ -153,27 +144,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hours = int(work_time.total_seconds() // 3600)
         minutes = int((work_time.total_seconds() % 3600) // 60)
 
-        await update.message.reply_text(
+        off_workers[uid] = {
+            "name": name,
+            "time": t,
+            "shift": info["shift"],
+            "work": f"{hours}小时{minutes}分钟",
+        }
+
+        msg = (
             f"✅ {name} 下班打卡成功\n"
             f"班次：{info['shift']}\n"
             f"下班时间：{t.strftime('%H:%M')}\n"
-            f"工作时长：{hours}小时{minutes}分钟\n\n"
-            + online_summary()
+            f"工作时长：{hours}小时{minutes}分钟"
         )
 
-        # 如果没人上班了，1小时后清空
+        await send_summary(update.message, msg)
+
         if len(workers) == 0:
             async def clear_later():
                 await asyncio.sleep(60 * 60)
                 if len(workers) == 0:
                     away.clear()
                     late_workers.clear()
+                    off_workers.clear()
 
             asyncio.create_task(clear_later())
 
         return
 
-    # 离岗：wc cy cf cq
     if text in LIMITS:
         if uid not in workers:
             await update.message.reply_text(f"⚠️ {name} 你还没有上班打卡，不能离岗。")
@@ -192,7 +190,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"⏳ {name} 开始{action}\n"
             f"限制时间：{limit}分钟\n"
-            f"回来请回复：1"
+            f"回来请回复：1",
+            reply_markup=list_button()
         )
 
         async def check_timeout(user_id):
@@ -204,18 +203,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(
                     chat_id=info["chat_id"],
                     text=(
-                        f"⚠️ 超时未归\n\n"
+                        f"⚠️ 离岗超时提醒\n\n"
                         f"员工：{info['name']}\n"
-                        f"状态：{info['action']}\n"
+                        f"项目：{info['action']}\n"
                         f"限制时间：{info['limit']}分钟\n"
-                        f"当前已用：{used}分钟"
+                        f"当前已用：{used}分钟\n\n"
+                        f"请尽快返回岗位，回来请回复：1"
                     ),
+                    reply_markup=list_button()
                 )
 
         asyncio.create_task(check_timeout(uid))
         return
 
-    # 返回岗位
     if text == "1":
         if uid not in away:
             await update.message.reply_text(f"{name} 当前没有离岗记录。")
@@ -224,58 +224,106 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         info = away.pop(uid)
         used = int((t - info["start"]).total_seconds() // 60)
 
-        status = "正常"
         if used > info["limit"]:
             status = f"超时 {used - info['limit']} 分钟"
+        else:
+            status = "正常"
 
         await update.message.reply_text(
             f"✅ {name} 已返回岗位\n"
             f"项目：{info['action']}\n"
             f"用时：{used}分钟\n"
-            f"状态：{status}"
+            f"状态：{status}",
+            reply_markup=list_button()
         )
         return
 
-    # 查看人数
     if text in ["rs", "/rs"]:
-        await update.message.reply_text(online_summary())
+        await update.message.reply_text(summary_text(), reply_markup=list_button())
         return
 
-    # 查看离岗
     if text in ["zt", "/zt"]:
-        if not away:
-            await update.message.reply_text("当前无人离岗。")
-            return
-
-        lines = []
-        for info in away.values():
-            used = int((t - info["start"]).total_seconds() // 60)
-            lines.append(
-                f"{info['name']}：{info['action']}，已用 {used} 分钟，限制 {info['limit']} 分钟"
-            )
-
-        await update.message.reply_text("当前离岗人员：\n" + "\n".join(lines))
+        await show_away(update.message)
         return
 
-    # 查看迟到
     if text in ["cd", "/cd"]:
-        if not late_workers:
-            await update.message.reply_text("今日迟到人员：暂无")
-            return
-
-        lines = []
-        for info in late_workers.values():
-            lines.append(
-                f"{info['name']}：{info['shift']}，迟到 {info['minutes']} 分钟"
-            )
-
-        await update.message.reply_text("今日迟到人员：\n" + "\n".join(lines))
+        await show_late(update.message)
         return
+
+
+async def show_workers(target):
+    if not workers:
+        text = "当前上班员工名单：暂无"
+    else:
+        lines = []
+        for i, info in enumerate(workers.values(), 1):
+            lines.append(f"{i}. {info['name']}｜{info['shift']}｜{info['start'].strftime('%H:%M')}")
+        text = "当前上班员工名单：\n\n" + "\n".join(lines) + f"\n\n总人数：{len(workers)}"
+
+    await target.reply_text(text)
+
+
+async def show_away(target):
+    if not away:
+        await target.reply_text("当前离岗人员：暂无")
+        return
+
+    t = now()
+    lines = []
+    for i, info in enumerate(away.values(), 1):
+        used = int((t - info["start"]).total_seconds() // 60)
+        lines.append(f"{i}. {info['name']}｜{info['action']}｜已用 {used} 分钟｜限制 {info['limit']} 分钟")
+
+    await target.reply_text("当前离岗人员：\n\n" + "\n".join(lines))
+
+
+async def show_late(target):
+    if not late_workers:
+        await target.reply_text("今日迟到人员：暂无")
+        return
+
+    lines = []
+    for i, info in enumerate(late_workers.values(), 1):
+        lines.append(f"{i}. {info['name']}｜{info['shift']}｜迟到 {info['minutes']} 分钟")
+
+    await target.reply_text("今日迟到人员：\n\n" + "\n".join(lines))
+
+
+async def show_off(target):
+    if not off_workers:
+        await target.reply_text("今日下班人员：暂无")
+        return
+
+    lines = []
+    for i, info in enumerate(off_workers.values(), 1):
+        lines.append(f"{i}. {info['name']}｜{info['shift']}｜{info['time'].strftime('%H:%M')}｜{info['work']}")
+
+    await target.reply_text("今日下班人员：\n\n" + "\n".join(lines))
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+
+    if data == "list_workers":
+        await show_workers(query.message)
+
+    elif data == "list_away":
+        await show_away(query.message)
+
+    elif data == "list_late":
+        await show_late(query.message)
+
+    elif data == "list_off":
+        await show_off(query.message)
 
 
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(button_handler))
 app.add_handler(MessageHandler(filters.TEXT, handle_message))
 
 app.run_polling()
