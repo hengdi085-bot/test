@@ -7,13 +7,7 @@ from html import escape
 from flask import Flask
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.ext import (
-    ApplicationBuilder,
-    MessageHandler,
-    CommandHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", "8080"))
@@ -75,24 +69,6 @@ def get_shift(t):
         shift = "夜班"
         late = t.replace(hour=22, minute=0, second=0, microsecond=0)
     return shift, late
-
-
-def detail_link(chat_id):
-    if not PUBLIC_URL:
-        return "员工名单：请先设置 PUBLIC_URL"
-    return f'员工名单：<a href="{PUBLIC_URL}/report/{chat_id}">详细查看</a>'
-
-
-def summary(chat_id):
-    return f"远程当天上班总人数：{len(workers)}\n{detail_link(chat_id)}"
-
-
-async def send_msg(message, text):
-    await message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
 
 
 async def alert_group(context, chat_id, text):
@@ -192,16 +168,12 @@ def report(chat_id):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_msg(
-        update.message,
+    await alert_group(
+        context,
+        update.message.chat_id,
         "打卡机器人已启动\n\n"
-        "上班：sb\n"
-        "下班：xb\n"
-        "上厕所：wc\n"
-        "抽烟：cy\n"
-        "吃饭：cf\n"
-        "出去：cq\n"
-        "回来：1",
+        "正常打卡不会提示。\n"
+        "只有迟到、超时、重复打卡、未上班离岗等异常才会提醒主管。"
     )
 
 
@@ -218,10 +190,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "sb":
         if uid in workers:
-            await send_msg(
-                update.message,
-                f"⚠️ {safe(name)} 已经上班打卡过了，不能重复打卡。\n\n{summary(chat_id)}",
-            )
             await alert_group(
                 context,
                 chat_id,
@@ -258,15 +226,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{shift}｜{t.strftime('%H:%M')}｜{'迟到' if is_late else '正常'}",
         )
 
-        await send_msg(
-            update.message,
-            f"✅ {safe(name)} 上班打卡成功\n"
-            f"班次：{shift}\n"
-            f"打卡时间：{t.strftime('%H:%M')}\n"
-            f"状态：{'迟到 ' + str(late_minutes) + ' 分钟' if is_late else '正常'}\n\n"
-            f"{summary(chat_id)}",
-        )
-
         if is_late:
             await alert_group(
                 context,
@@ -282,7 +241,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "xb":
         if uid not in workers:
-            await send_msg(update.message, f"⚠️ {safe(name)} 你还没有上班打卡。")
             await alert_group(
                 context,
                 chat_id,
@@ -314,20 +272,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "下班",
             f"{info['shift']}｜{t.strftime('%H:%M')}｜{hours}小时{minutes}分钟",
         )
-
-        await send_msg(
-            update.message,
-            f"✅ {safe(name)} 下班打卡成功\n"
-            f"班次：{info['shift']}\n"
-            f"下班时间：{t.strftime('%H:%M')}\n"
-            f"工作时长：{hours}小时{minutes}分钟\n\n"
-            f"{summary(chat_id)}",
-        )
         return
 
     if text in LIMITS:
         if uid not in workers:
-            await send_msg(update.message, f"⚠️ {safe(name)} 你还没有上班打卡，不能离岗。")
             await alert_group(
                 context,
                 chat_id,
@@ -342,7 +290,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if uid in away:
             old = away[uid]
-            await send_msg(update.message, f"⚠️ {safe(name)} 当前已经在{old['action']}，不能重复离岗。")
             await alert_group(
                 context,
                 chat_id,
@@ -368,14 +315,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         add_log(chat_id, name, action, f"开始｜限制 {limit} 分钟")
 
-        await send_msg(
-            update.message,
-            f"⏳ {safe(name)} 开始{action}\n"
-            f"限制时间：{limit}分钟\n"
-            f"回来请回复：1\n\n"
-            f"{summary(chat_id)}",
-        )
-
         async def check_timeout(user_id):
             await asyncio.sleep(limit * 60)
 
@@ -399,7 +338,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "1":
         if uid not in away:
-            await send_msg(update.message, f"{safe(name)} 当前没有离岗记录。")
             return
 
         info = away.pop(uid)
@@ -408,15 +346,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "正常" if not is_over else f"超时 {used - info['limit']} 分钟"
 
         add_log(chat_id, name, f"{info['action']}返回", f"用时 {used} 分钟｜{status}")
-
-        await send_msg(
-            update.message,
-            f"✅ {safe(name)} 已返回岗位\n"
-            f"项目：{info['action']}\n"
-            f"用时：{used}分钟\n"
-            f"状态：{status}\n\n"
-            f"{summary(chat_id)}",
-        )
 
         if is_over:
             await alert_group(
@@ -433,7 +362,16 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text in ["rs", "/rs"]:
-        await send_msg(update.message, summary(chat_id))
+        if not PUBLIC_URL:
+            await alert_group(context, chat_id, "请先设置 PUBLIC_URL")
+            return
+
+        await alert_group(
+            context,
+            chat_id,
+            f'当前上班人数：{len(workers)}\n'
+            f'员工名单：<a href="{PUBLIC_URL}/report/{chat_id}">详细查看</a>',
+        )
         return
 
 
