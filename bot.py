@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
 from html import escape
 
@@ -24,6 +25,7 @@ away = {}
 late_workers = {}
 off_workers = {}
 logs = {}
+alias_by_sender = {}
 
 LIMITS = {
     "wc": ("上厕所", 15),
@@ -45,6 +47,10 @@ def get_name(user):
 
 def safe(text):
     return escape(str(text))
+
+
+def make_name_uid(name):
+    return "name:" + name
 
 
 def add_log(chat_id, name, action, detail):
@@ -74,38 +80,44 @@ def parse_clock_text(raw_text, user):
     sender_name = get_name(user)
 
     if low == "sb":
-        return sender_id, sender_name, "sb"
+        return sender_id, sender_name, "sb", sender_id
 
     if low == "xb":
-        return sender_id, sender_name, "xb"
+        uid = alias_by_sender.get(sender_id, sender_id)
+        name = workers.get(uid, {}).get("name", sender_name)
+        return uid, name, "xb", sender_id
 
     if text in ["上班", "已上班"]:
-        return sender_id, sender_name, "sb"
+        return sender_id, sender_name, "sb", sender_id
 
     if text in ["下班", "已下班"]:
-        return sender_id, sender_name, "xb"
+        uid = alias_by_sender.get(sender_id, sender_id)
+        name = workers.get(uid, {}).get("name", sender_name)
+        return uid, name, "xb", sender_id
 
     if text.endswith("已上班"):
         name = text[:-3].strip()
         if name:
-            return name, name, "sb"
+            return make_name_uid(name), name, "sb", sender_id
 
     if text.endswith("上班"):
         name = text[:-2].strip()
         if name:
-            return name, name, "sb"
+            return make_name_uid(name), name, "sb", sender_id
 
     if text.endswith("已下班"):
         name = text[:-3].strip()
         if name:
-            return name, name, "xb"
+            return make_name_uid(name), name, "xb", sender_id
 
     if text.endswith("下班"):
         name = text[:-2].strip()
         if name:
-            return name, name, "xb"
+            return make_name_uid(name), name, "xb", sender_id
 
-    return sender_id, sender_name, low
+    uid = alias_by_sender.get(sender_id, sender_id)
+    name = workers.get(uid, {}).get("name", sender_name)
+    return uid, name, low, sender_id
 
 
 async def alert_group(context, chat_id, text):
@@ -210,7 +222,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.message.chat_id,
         "打卡机器人已启动\n\n"
         "正常打卡不会提示。\n"
-        "只有迟到、超时、重复打卡、未上班离岗等异常才会提醒主管。"
+        "只有迟到、超时、未上班离岗等异常才会提醒主管。"
     )
 
 
@@ -223,19 +235,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     t = now()
 
-    uid, name, text = parse_clock_text(raw_text, user)
+    uid, name, text, sender_id = parse_clock_text(raw_text, user)
 
     if text == "sb":
         if uid in workers:
-            await alert_group(
-                context,
-                chat_id,
-                f"⚠️ 打卡异常，请处理\n\n"
-                f"员工：{safe(name)}\n"
-                f"类型：重复上班打卡\n"
-                f"时间：{t.strftime('%H:%M')}\n\n"
-                f"{ALERT_USERS}",
-            )
             return
 
         shift, late_time = get_shift(t)
@@ -248,6 +251,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "shift": shift,
             "late": is_late,
         }
+
+        alias_by_sender[sender_id] = uid
 
         if is_late:
             late_workers[uid] = {
@@ -278,15 +283,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "xb":
         if uid not in workers:
-            await alert_group(
-                context,
-                chat_id,
-                f"⚠️ 打卡异常，请处理\n\n"
-                f"员工：{safe(name)}\n"
-                f"类型：未上班就下班打卡\n"
-                f"时间：{t.strftime('%H:%M')}\n\n"
-                f"{ALERT_USERS}",
-            )
             return
 
         info = workers.pop(uid)
@@ -313,36 +309,13 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text in LIMITS:
         if uid not in workers:
-            await alert_group(
-                context,
-                chat_id,
-                f"⚠️ 离岗异常，请处理\n\n"
-                f"员工：{safe(name)}\n"
-                f"类型：未上班就申请离岗\n"
-                f"操作：{text}\n"
-                f"时间：{t.strftime('%H:%M')}\n\n"
-                f"{ALERT_USERS}",
-            )
-            return
-
-        if uid in away:
-            old = away[uid]
-            await alert_group(
-                context,
-                chat_id,
-                f"⚠️ 离岗异常，请处理\n\n"
-                f"员工：{safe(name)}\n"
-                f"类型：重复离岗\n"
-                f"当前状态：{old['action']}\n"
-                f"新操作：{text}\n"
-                f"时间：{t.strftime('%H:%M')}\n\n"
-                f"{ALERT_USERS}",
-            )
             return
 
         action, limit = LIMITS[text]
+        token = str(uuid.uuid4())
 
         away[uid] = {
+            "token": token,
             "name": name,
             "action": action,
             "start": t,
@@ -352,25 +325,35 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         add_log(chat_id, name, action, f"开始｜限制 {limit} 分钟")
 
-        async def check_timeout(user_id):
+        async def check_timeout(user_id, check_token):
             await asyncio.sleep(limit * 60)
 
             info = away.get(user_id)
-            if info:
-                used = int((now() - info["start"]).total_seconds() // 60)
-                await alert_group(
-                    context,
-                    info["chat_id"],
-                    f"⚠️ 离岗超时，请处理\n\n"
-                    f"员工：{safe(info['name'])}\n"
-                    f"项目：{info['action']}\n"
-                    f"限制时间：{info['limit']}分钟\n"
-                    f"当前已用：{used}分钟\n"
-                    f"状态：超时未归\n\n"
-                    f"{ALERT_USERS}",
-                )
 
-        asyncio.create_task(check_timeout(uid))
+            if not info:
+                return
+
+            if info.get("token") != check_token:
+                return
+
+            used = int((now() - info["start"]).total_seconds() // 60)
+
+            if used < info["limit"]:
+                return
+
+            await alert_group(
+                context,
+                info["chat_id"],
+                f"⚠️ 离岗超时，请处理\n\n"
+                f"员工：{safe(info['name'])}\n"
+                f"项目：{info['action']}\n"
+                f"限制时间：{info['limit']}分钟\n"
+                f"当前已用：{used}分钟\n"
+                f"状态：超时未归\n\n"
+                f"{ALERT_USERS}",
+            )
+
+        asyncio.create_task(check_timeout(uid, token))
         return
 
     if text == "1":
