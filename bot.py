@@ -7,7 +7,13 @@ from html import escape
 from flask import Flask
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    CommandHandler,
+    ContextTypes,
+    filters,
+)
 
 TOKEN = os.getenv("TOKEN")
 PORT = int(os.getenv("PORT", "8080"))
@@ -85,7 +91,7 @@ async def send_msg(message, text):
     await message.reply_text(
         text,
         parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
+        disable_web_page_preview=True,
     )
 
 
@@ -94,7 +100,7 @@ async def alert_group(context, chat_id, text):
         chat_id=chat_id,
         text=text,
         parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
+        disable_web_page_preview=True,
     )
 
 
@@ -107,7 +113,7 @@ def home():
 def report(chat_id):
     try:
         cid = int(chat_id)
-    except:
+    except Exception:
         return "错误的链接"
 
     worker_lines = []
@@ -195,7 +201,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "抽烟：cy\n"
         "吃饭：cf\n"
         "出去：cq\n"
-        "回来：1"
+        "回来：1",
     )
 
 
@@ -214,7 +220,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if uid in workers:
             await send_msg(
                 update.message,
-                f"⚠️ {safe(name)} 已经上班打卡过了，不能重复打卡。\n\n{summary(chat_id)}"
+                f"⚠️ {safe(name)} 已经上班打卡过了，不能重复打卡。\n\n{summary(chat_id)}",
             )
             await alert_group(
                 context,
@@ -223,7 +229,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"员工：{safe(name)}\n"
                 f"类型：重复上班打卡\n"
                 f"时间：{t.strftime('%H:%M')}\n\n"
-                f"{ALERT_USERS}"
+                f"{ALERT_USERS}",
             )
             return
 
@@ -245,16 +251,21 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "minutes": late_minutes,
             }
 
-        add_log(chat_id, name, "上班", f"{shift}｜{t.strftime('%H:%M')}｜{'迟到' if is_late else '正常'}")
+        add_log(
+            chat_id,
+            name,
+            "上班",
+            f"{shift}｜{t.strftime('%H:%M')}｜{'迟到' if is_late else '正常'}",
+        )
 
-        msg = (
+        await send_msg(
+            update.message,
             f"✅ {safe(name)} 上班打卡成功\n"
             f"班次：{shift}\n"
             f"打卡时间：{t.strftime('%H:%M')}\n"
             f"状态：{'迟到 ' + str(late_minutes) + ' 分钟' if is_late else '正常'}\n\n"
-            f"{summary(chat_id)}"
+            f"{summary(chat_id)}",
         )
-        await send_msg(update.message, msg)
 
         if is_late:
             await alert_group(
@@ -265,7 +276,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"班次：{shift}\n"
                 f"打卡时间：{t.strftime('%H:%M')}\n"
                 f"迟到：{late_minutes}分钟\n\n"
-                f"{ALERT_USERS}"
+                f"{ALERT_USERS}",
             )
         return
 
@@ -279,7 +290,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"员工：{safe(name)}\n"
                 f"类型：未上班就下班打卡\n"
                 f"时间：{t.strftime('%H:%M')}\n\n"
-                f"{ALERT_USERS}"
+                f"{ALERT_USERS}",
             )
             return
 
@@ -297,7 +308,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "work": f"{hours}小时{minutes}分钟",
         }
 
-        add_log(chat_id, name, "下班", f"{info['shift']}｜{t.strftime('%H:%M')}｜{hours}小时{minutes}分钟")
+        add_log(
+            chat_id,
+            name,
+            "下班",
+            f"{info['shift']}｜{t.strftime('%H:%M')}｜{hours}小时{minutes}分钟",
+        )
 
         await send_msg(
             update.message,
@@ -305,7 +321,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"班次：{info['shift']}\n"
             f"下班时间：{t.strftime('%H:%M')}\n"
             f"工作时长：{hours}小时{minutes}分钟\n\n"
-            f"{summary(chat_id)}"
+            f"{summary(chat_id)}",
         )
         return
 
@@ -320,7 +336,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"类型：未上班就申请离岗\n"
                 f"操作：{text}\n"
                 f"时间：{t.strftime('%H:%M')}\n\n"
-                f"{ALERT_USERS}"
+                f"{ALERT_USERS}",
             )
             return
 
@@ -336,7 +352,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"当前状态：{old['action']}\n"
                 f"新操作：{text}\n"
                 f"时间：{t.strftime('%H:%M')}\n\n"
-                f"{ALERT_USERS}"
+                f"{ALERT_USERS}",
             )
             return
 
@@ -357,18 +373,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏳ {safe(name)} 开始{action}\n"
             f"限制时间：{limit}分钟\n"
             f"回来请回复：1\n\n"
-            f"{summary(chat_id)}"
-        )
-
-        await alert_group(
-            context,
-            chat_id,
-            f"⚠️ 离岗提醒，请关注\n\n"
-            f"员工：{safe(name)}\n"
-            f"项目：{action}\n"
-            f"限制时间：{limit}分钟\n"
-            f"开始时间：{t.strftime('%H:%M')}\n\n"
-            f"{ALERT_USERS}"
+            f"{summary(chat_id)}",
         )
 
         async def check_timeout(user_id):
@@ -386,7 +391,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"限制时间：{info['limit']}分钟\n"
                     f"当前已用：{used}分钟\n"
                     f"状态：超时未归\n\n"
-                    f"{ALERT_USERS}"
+                    f"{ALERT_USERS}",
                 )
 
         asyncio.create_task(check_timeout(uid))
@@ -410,7 +415,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"项目：{info['action']}\n"
             f"用时：{used}分钟\n"
             f"状态：{status}\n\n"
-            f"{summary(chat_id)}"
+            f"{summary(chat_id)}",
         )
 
         if is_over:
@@ -423,7 +428,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"限制时间：{info['limit']}分钟\n"
                 f"实际用时：{used}分钟\n"
                 f"超时：{used - info['limit']}分钟\n\n"
-                f"{ALERT_USERS}"
+                f"{ALERT_USERS}",
             )
         return
 
