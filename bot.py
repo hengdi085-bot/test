@@ -181,7 +181,11 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-       raw_text = update.message.text.strip()
+       async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    raw_text = update.message.text.strip()
     text = raw_text.lower()
 
     user = update.message.from_user
