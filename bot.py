@@ -2,6 +2,7 @@ import os
 import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
+from html import escape
 
 from flask import Flask
 from telegram import Update
@@ -15,6 +16,8 @@ TZ = timezone(timedelta(hours=8))
 PUBLIC_URL = os.getenv("PUBLIC_URL") or os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
 if PUBLIC_URL and not PUBLIC_URL.startswith("http"):
     PUBLIC_URL = "https://" + PUBLIC_URL
+
+ALERT_USERS = "@HFDG168 @ZHTT16888"
 
 workers = {}
 away = {}
@@ -38,6 +41,10 @@ def now():
 
 def get_name(user):
     return user.full_name or user.username or str(user.id)
+
+
+def safe(text):
+    return escape(str(text))
 
 
 def chat_logs(chat_id):
@@ -82,6 +89,15 @@ async def send_msg(message, text):
     )
 
 
+async def alert_group(context, chat_id, text):
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+
 @web.route("/")
 def home():
     return "打卡机器人运行中"
@@ -97,35 +113,35 @@ def report(chat_id):
     worker_lines = []
     for i, info in enumerate(workers.values(), 1):
         worker_lines.append(
-            f"{i}. {info['name']}｜{info['shift']}｜上班 {info['start'].strftime('%H:%M')}｜{'迟到' if info['late'] else '正常'}"
+            f"{i}. {safe(info['name'])}｜{info['shift']}｜上班 {info['start'].strftime('%H:%M')}｜{'迟到' if info['late'] else '正常'}"
         )
 
     away_lines = []
     for i, info in enumerate(away.values(), 1):
         used = int((now() - info["start"]).total_seconds() // 60)
         away_lines.append(
-            f"{i}. {info['name']}｜{info['action']}｜已用 {used} 分钟｜限制 {info['limit']} 分钟"
+            f"{i}. {safe(info['name'])}｜{info['action']}｜已用 {used} 分钟｜限制 {info['limit']} 分钟"
         )
 
     late_lines = []
     for i, info in enumerate(late_workers.values(), 1):
         late_lines.append(
-            f"{i}. {info['name']}｜{info['shift']}｜迟到 {info['minutes']} 分钟"
+            f"{i}. {safe(info['name'])}｜{info['shift']}｜迟到 {info['minutes']} 分钟"
         )
 
     off_lines = []
     for i, info in enumerate(off_workers.values(), 1):
         off_lines.append(
-            f"{i}. {info['name']}｜{info['shift']}｜下班 {info['time'].strftime('%H:%M')}｜工作 {info['work']}"
+            f"{i}. {safe(info['name'])}｜{info['shift']}｜下班 {info['time'].strftime('%H:%M')}｜工作 {info['work']}"
         )
 
     log_lines = []
     for item in logs.get(cid, []):
         log_lines.append(
-            f"{item['time']}｜{item['name']}｜{item['action']}｜{item['detail']}"
+            f"{item['time']}｜{safe(item['name'])}｜{item['action']}｜{item['detail']}"
         )
 
-    html = f"""
+    return f"""
     <html>
     <head>
         <meta charset="utf-8">
@@ -167,7 +183,6 @@ def report(chat_id):
     </body>
     </html>
     """
-    return html
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -185,6 +200,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
     text = update.message.text.strip().lower()
     user = update.message.from_user
     uid = user.id
@@ -193,6 +211,22 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = now()
 
     if text == "sb":
+        if uid in workers:
+            await send_msg(
+                update.message,
+                f"⚠️ {safe(name)} 已经上班打卡过了，不能重复打卡。\n\n{summary(chat_id)}"
+            )
+            await alert_group(
+                context,
+                chat_id,
+                f"⚠️ 打卡异常，请处理\n\n"
+                f"员工：{safe(name)}\n"
+                f"类型：重复上班打卡\n"
+                f"时间：{t.strftime('%H:%M')}\n\n"
+                f"{ALERT_USERS}"
+            )
+            return
+
         shift, late_time = get_shift(t)
         is_late = t > late_time
         late_minutes = int((t - late_time).total_seconds() // 60) if is_late else 0
@@ -214,18 +248,39 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_log(chat_id, name, "上班", f"{shift}｜{t.strftime('%H:%M')}｜{'迟到' if is_late else '正常'}")
 
         msg = (
-            f"✅ {name} 上班打卡成功\n"
+            f"✅ {safe(name)} 上班打卡成功\n"
             f"班次：{shift}\n"
             f"打卡时间：{t.strftime('%H:%M')}\n"
             f"状态：{'迟到 ' + str(late_minutes) + ' 分钟' if is_late else '正常'}\n\n"
             f"{summary(chat_id)}"
         )
         await send_msg(update.message, msg)
+
+        if is_late:
+            await alert_group(
+                context,
+                chat_id,
+                f"⚠️ 上班迟到，请处理\n\n"
+                f"员工：{safe(name)}\n"
+                f"班次：{shift}\n"
+                f"打卡时间：{t.strftime('%H:%M')}\n"
+                f"迟到：{late_minutes}分钟\n\n"
+                f"{ALERT_USERS}"
+            )
         return
 
     if text == "xb":
         if uid not in workers:
-            await send_msg(update.message, f"⚠️ {name} 你还没有上班打卡。")
+            await send_msg(update.message, f"⚠️ {safe(name)} 你还没有上班打卡。")
+            await alert_group(
+                context,
+                chat_id,
+                f"⚠️ 打卡异常，请处理\n\n"
+                f"员工：{safe(name)}\n"
+                f"类型：未上班就下班打卡\n"
+                f"时间：{t.strftime('%H:%M')}\n\n"
+                f"{ALERT_USERS}"
+            )
             return
 
         info = workers.pop(uid)
@@ -244,22 +299,49 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         add_log(chat_id, name, "下班", f"{info['shift']}｜{t.strftime('%H:%M')}｜{hours}小时{minutes}分钟")
 
-        msg = (
-            f"✅ {name} 下班打卡成功\n"
+        await send_msg(
+            update.message,
+            f"✅ {safe(name)} 下班打卡成功\n"
             f"班次：{info['shift']}\n"
             f"下班时间：{t.strftime('%H:%M')}\n"
             f"工作时长：{hours}小时{minutes}分钟\n\n"
             f"{summary(chat_id)}"
         )
-        await send_msg(update.message, msg)
         return
 
     if text in LIMITS:
         if uid not in workers:
-            await send_msg(update.message, f"⚠️ {name} 你还没有上班打卡，不能离岗。")
+            await send_msg(update.message, f"⚠️ {safe(name)} 你还没有上班打卡，不能离岗。")
+            await alert_group(
+                context,
+                chat_id,
+                f"⚠️ 离岗异常，请处理\n\n"
+                f"员工：{safe(name)}\n"
+                f"类型：未上班就申请离岗\n"
+                f"操作：{text}\n"
+                f"时间：{t.strftime('%H:%M')}\n\n"
+                f"{ALERT_USERS}"
+            )
+            return
+
+        if uid in away:
+            old = away[uid]
+            await send_msg(update.message, f"⚠️ {safe(name)} 当前已经在{old['action']}，不能重复离岗。")
+            await alert_group(
+                context,
+                chat_id,
+                f"⚠️ 离岗异常，请处理\n\n"
+                f"员工：{safe(name)}\n"
+                f"类型：重复离岗\n"
+                f"当前状态：{old['action']}\n"
+                f"新操作：{text}\n"
+                f"时间：{t.strftime('%H:%M')}\n\n"
+                f"{ALERT_USERS}"
+            )
             return
 
         action, limit = LIMITS[text]
+
         away[uid] = {
             "name": name,
             "action": action,
@@ -272,27 +354,39 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await send_msg(
             update.message,
-            f"⏳ {name} 开始{action}\n"
+            f"⏳ {safe(name)} 开始{action}\n"
             f"限制时间：{limit}分钟\n"
             f"回来请回复：1\n\n"
             f"{summary(chat_id)}"
         )
 
+        await alert_group(
+            context,
+            chat_id,
+            f"⚠️ 离岗提醒，请关注\n\n"
+            f"员工：{safe(name)}\n"
+            f"项目：{action}\n"
+            f"限制时间：{limit}分钟\n"
+            f"开始时间：{t.strftime('%H:%M')}\n\n"
+            f"{ALERT_USERS}"
+        )
+
         async def check_timeout(user_id):
             await asyncio.sleep(limit * 60)
+
             info = away.get(user_id)
             if info:
                 used = int((now() - info["start"]).total_seconds() // 60)
-                await context.bot.send_message(
-                    chat_id=info["chat_id"],
-                    text=(
-                        f"⚠️ 离岗超时提醒\n\n"
-                        f"员工：{info['name']}\n"
-                        f"项目：{info['action']}\n"
-                        f"限制时间：{info['limit']}分钟\n"
-                        f"当前已用：{used}分钟\n\n"
-                        f"请尽快返回岗位，回来请回复：1"
-                    )
+                await alert_group(
+                    context,
+                    info["chat_id"],
+                    f"⚠️ 离岗超时，请处理\n\n"
+                    f"员工：{safe(info['name'])}\n"
+                    f"项目：{info['action']}\n"
+                    f"限制时间：{info['limit']}分钟\n"
+                    f"当前已用：{used}分钟\n"
+                    f"状态：超时未归\n\n"
+                    f"{ALERT_USERS}"
                 )
 
         asyncio.create_task(check_timeout(uid))
@@ -300,23 +394,37 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "1":
         if uid not in away:
-            await send_msg(update.message, f"{name} 当前没有离岗记录。")
+            await send_msg(update.message, f"{safe(name)} 当前没有离岗记录。")
             return
 
         info = away.pop(uid)
         used = int((t - info["start"]).total_seconds() // 60)
-        status = "正常" if used <= info["limit"] else f"超时 {used - info['limit']} 分钟"
+        is_over = used > info["limit"]
+        status = "正常" if not is_over else f"超时 {used - info['limit']} 分钟"
 
         add_log(chat_id, name, f"{info['action']}返回", f"用时 {used} 分钟｜{status}")
 
         await send_msg(
             update.message,
-            f"✅ {name} 已返回岗位\n"
+            f"✅ {safe(name)} 已返回岗位\n"
             f"项目：{info['action']}\n"
             f"用时：{used}分钟\n"
             f"状态：{status}\n\n"
             f"{summary(chat_id)}"
         )
+
+        if is_over:
+            await alert_group(
+                context,
+                chat_id,
+                f"⚠️ 离岗返回异常，请处理\n\n"
+                f"员工：{safe(name)}\n"
+                f"项目：{info['action']}\n"
+                f"限制时间：{info['limit']}分钟\n"
+                f"实际用时：{used}分钟\n"
+                f"超时：{used - info['limit']}分钟\n\n"
+                f"{ALERT_USERS}"
+            )
         return
 
     if text in ["rs", "/rs"]:
