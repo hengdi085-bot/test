@@ -47,13 +47,9 @@ def safe(text):
     return escape(str(text))
 
 
-def chat_logs(chat_id):
-    logs.setdefault(chat_id, [])
-    return logs[chat_id]
-
-
 def add_log(chat_id, name, action, detail):
-    chat_logs(chat_id).append({
+    logs.setdefault(chat_id, [])
+    logs[chat_id].append({
         "time": now().strftime("%Y-%m-%d %H:%M:%S"),
         "name": name,
         "action": action,
@@ -69,6 +65,47 @@ def get_shift(t):
         shift = "夜班"
         late = t.replace(hour=22, minute=0, second=0, microsecond=0)
     return shift, late
+
+
+def parse_clock_text(raw_text, user):
+    text = raw_text.strip()
+    low = text.lower()
+    sender_id = user.id
+    sender_name = get_name(user)
+
+    if low == "sb":
+        return sender_id, sender_name, "sb"
+
+    if low == "xb":
+        return sender_id, sender_name, "xb"
+
+    if text in ["上班", "已上班"]:
+        return sender_id, sender_name, "sb"
+
+    if text in ["下班", "已下班"]:
+        return sender_id, sender_name, "xb"
+
+    if text.endswith("已上班"):
+        name = text[:-3].strip()
+        if name:
+            return name, name, "sb"
+
+    if text.endswith("上班"):
+        name = text[:-2].strip()
+        if name:
+            return name, name, "sb"
+
+    if text.endswith("已下班"):
+        name = text[:-3].strip()
+        if name:
+            return name, name, "xb"
+
+    if text.endswith("下班"):
+        name = text[:-2].strip()
+        if name:
+            return name, name, "xb"
+
+    return sender_id, sender_name, low
 
 
 async def alert_group(context, chat_id, text):
@@ -181,35 +218,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-       async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
     raw_text = update.message.text.strip()
-    text = raw_text.lower()
-
     user = update.message.from_user
-    uid = user.id
-    name = get_name(user)
-
-    # 兼容各种上班写法
-    if (
-        text == "sb"
-        or "上班" in raw_text
-        or "已上班" in raw_text
-    ):
-        text = "sb"
-
-    # 兼容各种下班写法
-    elif (
-        text == "xb"
-        or "下班" in raw_text
-        or "已下班" in raw_text
-    ):
-        text = "xb"
-
     chat_id = update.message.chat_id
     t = now()
+
+    uid, name, text = parse_clock_text(raw_text, user)
 
     if text == "sb":
         if uid in workers:
@@ -384,7 +398,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    if text in ["rs", "/rs"]:
+    if text in ["rs", "/rs", "人数", "查看"]:
         if not PUBLIC_URL:
             await alert_group(context, chat_id, "请先设置 PUBLIC_URL")
             return
