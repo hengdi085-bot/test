@@ -181,28 +181,29 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    raw_text = update.message.text.strip()
-text = raw_text.lower()
+       raw_text = update.message.text.strip()
+    text = raw_text.lower()
 
-user = update.message.from_user
-uid = user.id
-name = get_name(user)
+    user = update.message.from_user
+    uid = user.id
+    name = get_name(user)
 
-# 兼容各种上班写法
-if (
-    text == "sb"
-    or "上班" in raw_text
-    or "已上班" in raw_text
-):
-    text = "sb"
+    # 兼容各种上班写法
+    if (
+        text == "sb"
+        or "上班" in raw_text
+        or "已上班" in raw_text
+    ):
+        text = "sb"
 
-# 兼容各种下班写法
-elif (
-    text == "xb"
-    or "下班" in raw_text
-    or "已下班" in raw_text
-):
-    text = "xb"
+    # 兼容各种下班写法
+    elif (
+        text == "xb"
+        or "下班" in raw_text
+        or "已下班" in raw_text
+    ):
+        text = "xb"
+
     chat_id = update.message.chat_id
     t = now()
 
