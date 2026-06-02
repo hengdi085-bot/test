@@ -161,6 +161,12 @@ def report(chat_id):
             f"{i}. {safe(info['name'])}｜{info['action']}｜已用 {used_minutes} 分钟｜限制 {info['limit']} 分钟"
         )
 
+    abnormal_lines = []
+    for i, item in enumerate(abnormal_logs.get(cid, []), 1):
+        abnormal_lines.append(
+            f"{i}. {item['time']}｜{safe(item['name'])}｜{item['detail']}"
+        )
+
     late_lines = []
     for i, info in enumerate(late_workers.values(), 1):
         late_lines.append(
@@ -171,12 +177,6 @@ def report(chat_id):
     for i, info in enumerate(off_workers.values(), 1):
         off_lines.append(
             f"{i}. {safe(info['name'])}｜{info['shift']}｜下班 {info['time'].strftime('%H:%M')}｜工作 {info['work']}"
-        )
-
-    abnormal_lines = []
-    for i, item in enumerate(abnormal_logs.get(cid, []), 1):
-        abnormal_lines.append(
-            f"{i}. {item['time']}｜{safe(item['name'])}｜{item['detail']}"
         )
 
     log_lines = []
@@ -320,8 +320,28 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action, limit = LIMITS[text]
 
         if uid not in workers:
-            add_abnormal(chat_id, name, f"未上班直接{action}")
-            return
+            shift, late_time = get_shift(t)
+            is_late = t > late_time
+            late_minutes = int((t - late_time).total_seconds() // 60) if is_late else 0
+
+            workers[uid] = {
+                "name": name,
+                "start": t,
+                "shift": shift,
+                "late": is_late,
+            }
+
+            alias_by_sender[sender_id] = uid
+
+            if is_late:
+                late_workers[uid] = {
+                    "name": name,
+                    "shift": shift,
+                    "minutes": late_minutes,
+                }
+
+            add_abnormal(chat_id, name, f"未打上班卡，直接{action}，已自动算上班")
+            add_log(chat_id, name, "自动上班", f"{shift}｜{t.strftime('%H:%M')}｜直接{action}")
 
         token = str(uuid.uuid4())
 
