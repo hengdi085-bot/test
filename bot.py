@@ -25,6 +25,7 @@ away = {}
 late_workers = {}
 off_workers = {}
 logs = {}
+abnormal_logs = {}
 alias_by_sender = {}
 
 LIMITS = {
@@ -63,14 +64,19 @@ def add_log(chat_id, name, action, detail):
     })
 
 
+def add_abnormal(chat_id, name, detail):
+    abnormal_logs.setdefault(chat_id, [])
+    abnormal_logs[chat_id].append({
+        "time": now().strftime("%Y-%m-%d %H:%M:%S"),
+        "name": name,
+        "detail": detail,
+    })
+
+
 def get_shift(t):
     if 9 <= t.hour < 21:
-        shift = "白班"
-        late = t.replace(hour=10, minute=0, second=0, microsecond=0)
-    else:
-        shift = "夜班"
-        late = t.replace(hour=22, minute=0, second=0, microsecond=0)
-    return shift, late
+        return "白班", t.replace(hour=10, minute=0, second=0, microsecond=0)
+    return "夜班", t.replace(hour=22, minute=0, second=0, microsecond=0)
 
 
 def parse_clock_text(raw_text, user):
@@ -149,9 +155,10 @@ def report(chat_id):
 
     away_lines = []
     for i, info in enumerate(away.values(), 1):
-        used = int((now() - info["start"]).total_seconds() // 60)
+        used_seconds = int((now() - info["start"]).total_seconds())
+        used_minutes = (used_seconds + 59) // 60
         away_lines.append(
-            f"{i}. {safe(info['name'])}｜{info['action']}｜已用 {used} 分钟｜限制 {info['limit']} 分钟"
+            f"{i}. {safe(info['name'])}｜{info['action']}｜已用 {used_minutes} 分钟｜限制 {info['limit']} 分钟"
         )
 
     late_lines = []
@@ -164,6 +171,12 @@ def report(chat_id):
     for i, info in enumerate(off_workers.values(), 1):
         off_lines.append(
             f"{i}. {safe(info['name'])}｜{info['shift']}｜下班 {info['time'].strftime('%H:%M')}｜工作 {info['work']}"
+        )
+
+    abnormal_lines = []
+    for i, item in enumerate(abnormal_logs.get(cid, []), 1):
+        abnormal_lines.append(
+            f"{i}. {item['time']}｜{safe(item['name'])}｜{item['detail']}"
         )
 
     log_lines = []
@@ -198,6 +211,11 @@ def report(chat_id):
         </div>
 
         <div class="box">
+            <h2>异常行为记录</h2>
+            <pre>{chr(10).join(abnormal_lines) if abnormal_lines else "暂无"}</pre>
+        </div>
+
+        <div class="box">
             <h2>今日迟到人员</h2>
             <pre>{chr(10).join(late_lines) if late_lines else "暂无"}</pre>
         </div>
@@ -222,7 +240,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.message.chat_id,
         "打卡机器人已启动\n\n"
         "正常打卡不会提示。\n"
-        "只有迟到、超时、未上班离岗等异常才会提醒主管。"
+        "只有迟到、离岗超时等异常才会提醒主管。"
     )
 
 
@@ -261,12 +279,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "minutes": late_minutes,
             }
 
-        add_log(
-            chat_id,
-            name,
-            "上班",
-            f"{shift}｜{t.strftime('%H:%M')}｜{'迟到' if is_late else '正常'}",
-        )
+        add_log(chat_id, name, "上班", f"{shift}｜{t.strftime('%H:%M')}｜{'迟到' if is_late else '正常'}")
 
         if is_late:
             await alert_group(
@@ -283,6 +296,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "xb":
         if uid not in workers:
+            add_abnormal(chat_id, name, "未上班直接下班")
             return
 
         info = workers.pop(uid)
@@ -299,19 +313,16 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "work": f"{hours}小时{minutes}分钟",
         }
 
-        add_log(
-            chat_id,
-            name,
-            "下班",
-            f"{info['shift']}｜{t.strftime('%H:%M')}｜{hours}小时{minutes}分钟",
-        )
+        add_log(chat_id, name, "下班", f"{info['shift']}｜{t.strftime('%H:%M')}｜{hours}小时{minutes}分钟")
         return
 
     if text in LIMITS:
+        action, limit = LIMITS[text]
+
         if uid not in workers:
+            add_abnormal(chat_id, name, f"未上班直接{action}")
             return
 
-        action, limit = LIMITS[text]
         token = str(uuid.uuid4())
 
         away[uid] = {
@@ -325,8 +336,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         add_log(chat_id, name, action, f"开始｜限制 {limit} 分钟")
 
-        async def check_timeout(user_id, check_token):
-            await asyncio.sleep(limit * 60)
+        async def check_timeout(user_id, check_token, limit_minutes):
+            await asyncio.sleep(limit_minutes * 60)
 
             info = away.get(user_id)
 
@@ -336,9 +347,11 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if info.get("token") != check_token:
                 return
 
-            used = int((now() - info["start"]).total_seconds() // 60)
+            used_seconds = int((now() - info["start"]).total_seconds())
+            limit_seconds = info["limit"] * 60
+            used_minutes = (used_seconds + 59) // 60
 
-            if used < info["limit"]:
+            if used_seconds <= limit_seconds:
                 return
 
             await alert_group(
@@ -348,12 +361,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"员工：{safe(info['name'])}\n"
                 f"项目：{info['action']}\n"
                 f"限制时间：{info['limit']}分钟\n"
-                f"当前已用：{used}分钟\n"
+                f"当前已用：{used_minutes}分钟\n"
                 f"状态：超时未归\n\n"
                 f"{ALERT_USERS}",
             )
 
-        asyncio.create_task(check_timeout(uid, token))
+        asyncio.create_task(check_timeout(uid, token, limit))
         return
 
     if text == "1":
@@ -361,11 +374,17 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         info = away.pop(uid)
-        used = int((t - info["start"]).total_seconds() // 60)
-        is_over = used > info["limit"]
-        status = "正常" if not is_over else f"超时 {used - info['limit']} 分钟"
 
-        add_log(chat_id, name, f"{info['action']}返回", f"用时 {used} 分钟｜{status}")
+        used_seconds = int((t - info["start"]).total_seconds())
+        limit_seconds = info["limit"] * 60
+        used_minutes = (used_seconds + 59) // 60
+
+        is_over = used_seconds > limit_seconds
+        over_minutes = max(1, used_minutes - info["limit"]) if is_over else 0
+
+        status = "正常" if not is_over else f"超时 {over_minutes} 分钟"
+
+        add_log(chat_id, name, f"{info['action']}返回", f"用时 {used_minutes} 分钟｜{status}")
 
         if is_over:
             await alert_group(
@@ -375,8 +394,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"员工：{safe(name)}\n"
                 f"项目：{info['action']}\n"
                 f"限制时间：{info['limit']}分钟\n"
-                f"实际用时：{used}分钟\n"
-                f"超时：{used - info['limit']}分钟\n\n"
+                f"实际用时：{used_minutes}分钟\n"
+                f"超时：{over_minutes}分钟\n\n"
                 f"{ALERT_USERS}",
             )
         return
